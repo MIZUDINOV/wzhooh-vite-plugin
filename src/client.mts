@@ -37,39 +37,10 @@ export type WzhoohPreviewEventV1 = {
   [Type in PreviewEventType]: PreviewEventFor<Type>;
 }[PreviewEventType];
 
-export type BuildStatusState =
-  | "starting"
-  | "updating"
-  | "ready"
-  | "error"
-  | "disconnected";
-
-type BuildStatusSignalBase = {
-  protocol: 1;
-  session_id: string;
-  sequence: number;
-};
-
-export type BuildStatusSignalV1 =
-  | (BuildStatusSignalBase & {
-      state: Exclude<BuildStatusState, "error">;
-    })
-  | (BuildStatusSignalBase & {
-      state: "error";
-      error: PreviewErrorV1;
-    });
-
-declare module "vite/types/customEvent.d.ts" {
-  interface CustomEventMap {
-    "wzhooh:build-status": BuildStatusSignalV1;
-  }
-}
-
 export interface ClientRuntimeOptions {
   hmrNotifier: boolean;
   navigationNotifier: boolean;
   errorNotifier: boolean;
-  buildStatus: boolean;
   hmrTimeoutMs: number;
 }
 
@@ -142,28 +113,17 @@ export function installPreviewClient(
   root.__wzhoohPreviewClientV1 = true;
 
   let sequence = 0;
-  let statusSequence = 0;
   let channelID = "";
   let parentOrigin = "";
   let updating = false;
-  let compileErrorActive = false;
   let updateTimer: number | undefined;
   let runtimeBuffer: PreviewErrorV1[] = [];
-  let lastNavigationEvent:
-    | PreviewEventFor<"navigation.changed">
-    | undefined;
-  const sessionID =
-    root.crypto?.randomUUID?.() ??
-    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-
+  let lastNavigationEvent: PreviewEventFor<"navigation.changed"> | undefined;
   const postToParent = <Type extends PreviewEventType>(
     detail: PreviewEventFor<Type>,
   ): void => {
     if (!channelID || root.parent === root) return;
-    root.parent.postMessage(
-      { ...detail, channel_id: channelID },
-      parentOrigin,
-    );
+    root.parent.postMessage({ ...detail, channel_id: channelID }, parentOrigin);
   };
 
   const emit = <Type extends PreviewEventType>(
@@ -183,28 +143,8 @@ export function installPreviewClient(
     return detail;
   };
 
-  const sendBuildStatus = (
-    ...signal:
-      | [state: Exclude<BuildStatusState, "error">]
-      | [state: "error", error: PreviewErrorV1]
-  ): void => {
-    if (!options.buildStatus || !hot) return;
-    const base: Omit<BuildStatusSignalV1, "state" | "error"> = {
-      protocol: 1 as const,
-      session_id: sessionID,
-      sequence: ++statusSequence,
-    };
-    hot.send(
-      "wzhooh:build-status",
-      signal[0] === "error"
-        ? { ...base, state: signal[0], error: signal[1] }
-        : { ...base, state: signal[0] },
-    );
-  };
-
   const clearUpdate = (): void => {
     updating = false;
-    compileErrorActive = false;
     runtimeBuffer = [];
     if (updateTimer !== undefined) root.clearTimeout(updateTimer);
     updateTimer = undefined;
@@ -214,20 +154,17 @@ export function installPreviewClient(
     if (updateTimer !== undefined) root.clearTimeout(updateTimer);
     updateTimer = undefined;
     updating = false;
-    compileErrorActive = true;
     if (options.errorNotifier) {
       emit("hmr.error", error);
       for (const buffered of runtimeBuffer) emit("runtime.error", buffered);
     }
     runtimeBuffer = [];
-    sendBuildStatus("error", error);
   };
 
   const beginUpdate = (): void => {
     updating = true;
     runtimeBuffer = [];
     if (options.hmrNotifier) emit("hmr.updating", {});
-    sendBuildStatus("updating");
     if (updateTimer !== undefined) root.clearTimeout(updateTimer);
     updateTimer = root.setTimeout(
       () =>
@@ -319,30 +256,18 @@ export function installPreviewClient(
   if (!hot) return;
   hot.on("vite:ws:connect", () => {
     if (options.hmrNotifier) emit("hmr.connected", {});
-    sendBuildStatus("starting");
   });
   hot.on("vite:ws:disconnect", () => {
     if (options.hmrNotifier) emit("hmr.disconnected", {});
-    sendBuildStatus("disconnected");
   });
   hot.on("vite:beforeUpdate", beginUpdate);
   hot.on("vite:beforeFullReload", beginUpdate);
   hot.on("vite:afterUpdate", () => {
     clearUpdate();
     if (options.hmrNotifier) emit("hmr.ready", {});
-    sendBuildStatus("ready");
   });
   hot.on("vite:error", (payload) => {
     const error = sanitize(payload.err, "compile");
     failUpdate({ ...error, kind: "compile" });
   });
-
-  const initialReady = (): void => {
-    root.setTimeout(() => {
-      if (!compileErrorActive && !updating) sendBuildStatus("ready");
-    }, 0);
-  };
-  if (root.document?.readyState === "complete") initialReady();
-  else root.addEventListener("load", initialReady, { once: true });
-  sendBuildStatus("starting");
 }

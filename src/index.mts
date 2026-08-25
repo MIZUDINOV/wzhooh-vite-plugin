@@ -1,17 +1,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Plugin, UserConfig, ViteDevServer } from "vite";
+import type { HMRPayload, Plugin, UserConfig, ViteDevServer } from "vite";
 import {
   installPreviewClient,
   sanitizePreviewError,
-  type BuildStatusSignalV1,
-  type BuildStatusState,
   type ClientRuntimeOptions,
   type PreviewErrorV1,
 } from "./client.mjs";
 
 export type {
-  BuildStatusSignalV1,
-  BuildStatusState,
   PreviewErrorV1,
   PreviewEventDataMap,
   PreviewEventType,
@@ -29,63 +25,33 @@ export interface WzhoohVitePluginOptions {
 export interface BuildStatusV1 {
   protocol: 1;
   ok: boolean;
-  state: BuildStatusState;
   revision: number;
   updated_at: string;
   error?: PreviewErrorV1;
 }
 
 class BuildStatusStore {
-  private sessionID = "";
-  private sequence = 0;
   private value: BuildStatusV1 = {
     protocol: 1,
-    ok: false,
-    state: "starting",
+    ok: true,
     revision: 0,
     updated_at: new Date().toISOString(),
   };
 
-  update(payload: unknown): void {
-    if (!payload || typeof payload !== "object") return;
-    const input = payload as Partial<BuildStatusSignalV1>;
+  observe(payload: HMRPayload): void {
     if (
-      input.protocol !== 1 ||
-      typeof input.session_id !== "string" ||
-      !/^[A-Za-z0-9-]{16,128}$/.test(input.session_id) ||
-      typeof input.sequence !== "number" ||
-      !Number.isInteger(input.sequence) ||
-      input.sequence < 1 ||
-      !["starting", "updating", "ready", "error", "disconnected"].includes(
-        String(input.state),
-      )
+      payload.type !== "error" &&
+      payload.type !== "update" &&
+      payload.type !== "full-reload"
     )
       return;
-
-    const newSession = input.session_id !== this.sessionID;
-    if (newSession && input.sequence !== 1) return;
-    if (newSession) {
-      this.sessionID = input.session_id;
-      this.sequence = 0;
-    }
-    if (input.sequence! <= this.sequence) return;
-
-    const state = input.state as BuildStatusState;
     const error =
-      state === "error"
-        ? sanitizePreviewError(
-            (input as Partial<Extract<BuildStatusSignalV1, { state: "error" }>>)
-              .error,
-            "compile",
-          )
-        : !newSession && state !== "ready" && state !== "starting"
-          ? this.value.error
-          : undefined;
-    this.sequence = input.sequence!;
+      payload.type === "error"
+        ? { ...sanitizePreviewError(payload.err, "compile"), kind: "compile" }
+        : undefined;
     this.value = {
       protocol: 1,
-      ok: state === "ready",
-      state,
+      ok: !error,
       revision: this.value.revision + 1,
       updated_at: new Date().toISOString(),
       ...(error ? { error } : {}),
@@ -138,14 +104,12 @@ export default function wzhooh(options: WzhoohVitePluginOptions = {}): Plugin {
     hmrNotifier: options.hmrNotifier ?? false,
     navigationNotifier: options.navigationNotifier ?? false,
     errorNotifier: options.errorNotifier ?? false,
-    buildStatus: options.buildStatus ?? false,
     hmrTimeoutMs: 10_000,
   };
   const injectClient =
     runtimeOptions.hmrNotifier ||
     runtimeOptions.navigationNotifier ||
-    runtimeOptions.errorNotifier ||
-    runtimeOptions.buildStatus;
+    runtimeOptions.errorNotifier;
   const status = new BuildStatusStore();
 
   return {
@@ -153,23 +117,37 @@ export default function wzhooh(options: WzhoohVitePluginOptions = {}): Plugin {
     apply: "serve",
     enforce: "post",
     config(config: UserConfig) {
-      return {
-        server: {
-          ...(runtimeOptions.errorNotifier && config.server?.hmr !== false
-            ? { hmr: { overlay: false } }
-            : {}),
-          forwardConsole: options.forwardConsole
-            ? {
+      const server: NonNullable<UserConfig["server"]> = {
+        ...(runtimeOptions.errorNotifier && config.server?.hmr !== false
+          ? { hmr: { overlay: false } }
+          : {}),
+        ...(options.forwardConsole
+          ? {
+              forwardConsole: {
                 unhandledErrors: true,
                 logLevels: ["warn", "error"],
-              }
-            : false,
-        },
+              },
+            }
+          : {}),
       };
+      return Object.keys(server).length > 0 ? { server } : undefined;
     },
     configureServer(server: ViteDevServer) {
-      if (!runtimeOptions.buildStatus) return;
-      server.ws.on("wzhooh:build-status", (payload) => status.update(payload));
+      if (!options.buildStatus) return;
+      const channel = server.hot ?? server.ws;
+      const originalSend = channel.send.bind(channel);
+      channel.send = ((payloadOrEvent: HMRPayload | string, data?: unknown) => {
+        if (typeof payloadOrEvent !== "string") {
+          try {
+            status.observe(payloadOrEvent);
+          } catch {
+            // Build telemetry must never interrupt Vite's own HMR channel.
+          }
+        }
+        if (typeof payloadOrEvent === "string")
+          originalSend(payloadOrEvent, data);
+        else originalSend(payloadOrEvent);
+      }) as typeof channel.send;
       server.middlewares.use(buildStatusMiddleware(status));
     },
     resolveId(id) {

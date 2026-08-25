@@ -69,7 +69,6 @@ const options = {
   hmrNotifier: true,
   navigationNotifier: true,
   errorNotifier: true,
-  buildStatus: true,
   hmrTimeoutMs: 15,
 };
 
@@ -102,13 +101,12 @@ const validBridgeInit = (id = channelID) => ({
   channel_id: id,
 });
 
-const waitForTimers = () => new Promise((resolveTimer) => setTimeout(resolveTimer));
+const waitForTimers = () =>
+  new Promise((resolveTimer) => setTimeout(resolveTimer));
 
 test("Vite config is deterministic and preserves explicitly disabled HMR", async () => {
   const defaults = wzhooh();
-  assert.deepEqual(defaults.config({}), {
-    server: { forwardConsole: false },
-  });
+  assert.equal(defaults.config({}), undefined);
   assert.deepEqual(defaults.transformIndexHtml.handler("", {}), []);
   assert.equal(defaults.resolveId("other"), undefined);
   assert.equal(defaults.load("other"), undefined);
@@ -130,11 +128,6 @@ test("Vite config is deterministic and preserves explicitly disabled HMR", async
     },
   });
 
-  const resolvedDefaults = await resolveConfig(
-    { configFile: false, plugins: [defaults] },
-    "serve",
-  );
-  assert.equal(resolvedDefaults.server.forwardConsole.enabled, false);
   const resolvedDisabledHMR = await resolveConfig(
     {
       configFile: false,
@@ -177,7 +170,12 @@ test("real Vite serves the virtual client and production build stays clean", asy
     const status = await fetch(`${origin}/__wzhooh_build_status`);
     assert.equal(status.status, 200);
     assert.equal(status.headers.get("cache-control"), "no-store");
-    assert.equal((await status.json()).state, "starting");
+    const statusBody = await status.json();
+    assert.equal(statusBody.protocol, 1);
+    assert.equal(statusBody.ok, true);
+    assert.equal(statusBody.revision, 0);
+    assert.equal(Number.isNaN(Date.parse(statusBody.updated_at)), false);
+    assert.equal(statusBody.error, undefined);
   } finally {
     await server.close();
   }
@@ -243,33 +241,23 @@ test("sanitizer produces a bounded closed error payload", () => {
   );
 });
 
-test("client reports initial readiness only after load and blocks it on compile error", async () => {
+test("client reports HMR errors and readiness without sending server status", async () => {
   const root = new FakeWindow();
   const hot = new FakeHot();
   const events = collectEvents(root);
   installPreviewClient(options, sanitizePreviewError, root, hot);
-  assert.deepEqual(hot.sent.map((item) => item.payload.state), ["starting"]);
 
   hot.fire("vite:error", {
     err: { message: "/workspace/src/App.tsx failed", plugin: "vite:react" },
   });
   root.dispatchEvent(new Event("load"));
   await waitForTimers();
-  assert.equal(hot.sent.at(-1).payload.state, "error");
   assert.equal(events.at(-1).type, "hmr.error");
 
   hot.fire("vite:beforeUpdate");
   hot.fire("vite:afterUpdate");
-  assert.equal(hot.sent.at(-1).payload.state, "ready");
   assert.equal(events.at(-1).type, "hmr.ready");
-  assert.deepEqual(
-    hot.sent.map((item) => item.payload.sequence),
-    [1, 2, 3, 4],
-  );
-  assert.equal(
-    hot.sent.every((item) => item.payload.session_id === channelID),
-    true,
-  );
+  assert.deepEqual(hot.sent, []);
 });
 
 test("client covers HMR, runtime errors, buffering, timeout and reconnect", async () => {
@@ -278,11 +266,9 @@ test("client covers HMR, runtime errors, buffering, timeout and reconnect", asyn
   const events = collectEvents(root);
   installPreviewClient(options, sanitizePreviewError, root, hot);
   await waitForTimers();
-  assert.equal(hot.sent.at(-1).payload.state, "ready");
 
   hot.fire("vite:ws:connect");
   assert.equal(events.at(-1).type, "hmr.connected");
-  assert.equal(hot.sent.at(-1).payload.state, "starting");
 
   hot.fire("vite:beforeUpdate");
   hot.fire("vite:beforeUpdate");
@@ -337,14 +323,12 @@ test("client covers HMR, runtime errors, buffering, timeout and reconnect", asyn
   hot.fire("vite:beforeUpdate");
   await new Promise((resolveTimer) => setTimeout(resolveTimer, 25));
   assert.equal(events.at(-1).data.kind, "hmr_timeout");
-  assert.equal(hot.sent.at(-1).payload.state, "error");
 
   hot.fire("vite:beforeFullReload");
-  assert.equal(hot.sent.at(-1).payload.state, "updating");
   hot.fire("vite:afterUpdate");
   hot.fire("vite:ws:disconnect");
   assert.equal(events.at(-1).type, "hmr.disconnected");
-  assert.equal(hot.sent.at(-1).payload.state, "disconnected");
+  assert.deepEqual(hot.sent, []);
 
   const handlers = [...hot.handlers.values()].reduce(
     (count, values) => count + values.length,
@@ -432,7 +416,6 @@ test("client stays inert when features or HMR are disabled", async () => {
     hmrNotifier: false,
     navigationNotifier: false,
     errorNotifier: false,
-    buildStatus: false,
     hmrTimeoutMs: 5,
   };
   installPreviewClient(disabled, sanitizePreviewError, root, hot);
@@ -443,10 +426,10 @@ test("client stays inert when features or HMR are disabled", async () => {
   hot.fire("vite:error", { err: { message: "ignored compile" } });
   hot.fire("vite:afterUpdate");
   hot.fire("vite:ws:disconnect");
-  assert.deepEqual(events.map((event) => event.type), [
-    "bridge.ready",
-    "bridge.ready",
-  ]);
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ["bridge.ready", "bridge.ready"],
+  );
   assert.deepEqual(hot.sent, []);
   assert.deepEqual(root.parentMessages, []);
 
@@ -458,23 +441,25 @@ test("client stays inert when features or HMR are disabled", async () => {
   assert.equal(withoutHot.__wzhoohPreviewClientV1, true);
 });
 
-const createStatusHarness = (enabled = true) => {
-  const wsHandlers = new Map();
+const createStatusHarness = (enabled = true, useHot = true) => {
+  const sent = [];
   const middlewares = [];
+  const channel = {
+    send(...args) {
+      sent.push(args);
+    },
+  };
   const plugin = wzhooh({ buildStatus: enabled });
   plugin.configureServer({
-    ws: {
-      on(event, handler) {
-        wsHandlers.set(event, handler);
-      },
-    },
+    ...(useHot ? { hot: channel } : {}),
+    ws: channel,
     middlewares: {
       use(middleware) {
         middlewares.push(middleware);
       },
     },
   });
-  return { wsHandlers, middlewares };
+  return { channel, sent, middlewares };
 };
 
 const invokeMiddleware = (
@@ -499,94 +484,56 @@ const invokeMiddleware = (
   return { next, response };
 };
 
-test("build status rejects stale clients and exposes only loopback GET", () => {
-  assert.deepEqual(createStatusHarness(false), {
-    wsHandlers: new Map(),
-    middlewares: [],
-  });
-  const { wsHandlers, middlewares } = createStatusHarness();
-  const update = wsHandlers.get("wzhooh:build-status");
+test("build status follows server HMR payloads and exposes only loopback GET", () => {
+  assert.deepEqual(createStatusHarness(false).middlewares, []);
+  const wsFallback = createStatusHarness(true, false);
+  wsFallback.channel.send({ type: "update", updates: [] });
+  assert.equal(wsFallback.sent.length, 1);
+  const { channel, sent, middlewares } = createStatusHarness();
   const middleware = middlewares[0];
-  assert.equal(typeof update, "function");
   assert.equal(typeof middleware, "function");
 
-  const invalid = [
-    null,
-    {},
-    { protocol: 2, session_id: channelID, sequence: 1, state: "ready" },
-    { protocol: 1, session_id: "short", sequence: 1, state: "ready" },
-    { protocol: 1, session_id: channelID, state: "ready" },
-    { protocol: 1, session_id: channelID, sequence: 0, state: "ready" },
-    { protocol: 1, session_id: channelID, sequence: 1.5, state: "ready" },
-    { protocol: 1, session_id: channelID, sequence: 1, state: "unknown" },
-  ];
-  for (const payload of invalid) update(payload);
-  assert.equal(
-    JSON.parse(invokeMiddleware(middleware, {}).response.body).revision,
-    0,
-  );
-
-  update({
-    protocol: 1,
-    session_id: channelID,
-    sequence: 1,
-    state: "error",
-    error: { message: "/workspace/src/App.tsx failed" },
-  });
-  update({
-    protocol: 1,
-    session_id: channelID,
-    sequence: 2,
-    state: "updating",
-  });
-  update({
-    protocol: 1,
-    session_id: channelID,
-    sequence: 2,
-    state: "ready",
-  });
-  update({
-    protocol: 1,
-    session_id: secondChannelID,
-    sequence: 2,
-    state: "ready",
-  });
   let status = JSON.parse(invokeMiddleware(middleware, {}).response.body);
-  assert.equal(status.state, "updating");
-  assert.equal(status.error.message, "App.tsx failed");
-  assert.equal(status.revision, 2);
+  assert.equal(status.ok, true);
+  assert.equal(status.revision, 0);
 
-  update({
-    protocol: 1,
-    session_id: channelID,
-    sequence: 3,
-    state: "ready",
+  channel.send({
+    type: "error",
+    err: { message: "/workspace/src/App.tsx failed", stack: "stack" },
   });
+  status = JSON.parse(invokeMiddleware(middleware, {}).response.body);
+  assert.equal(status.ok, false);
+  assert.equal(status.error.message, "App.tsx failed");
+  assert.equal(status.error.kind, "compile");
+  assert.equal(status.revision, 1);
+
+  channel.send({ type: "update", updates: [] });
   status = JSON.parse(invokeMiddleware(middleware, {}).response.body);
   assert.equal(status.ok, true);
   assert.equal(status.error, undefined);
+  assert.equal(status.revision, 2);
 
-  update({
-    protocol: 1,
-    session_id: secondChannelID,
-    sequence: 1,
-    state: "starting",
-  });
-  update({
-    protocol: 1,
-    session_id: channelID,
-    sequence: 4,
-    state: "ready",
-  });
-  update({
-    protocol: 1,
-    session_id: secondChannelID,
-    sequence: 2,
-    state: "disconnected",
-  });
+  channel.send({ type: "error", err: { message: "again", stack: "stack" } });
+  channel.send({ type: "full-reload" });
   status = JSON.parse(invokeMiddleware(middleware, {}).response.body);
-  assert.equal(status.state, "disconnected");
-  assert.equal(status.revision, 5);
+  assert.equal(status.ok, true);
+  assert.equal(status.revision, 4);
+
+  channel.send({ type: "connected" });
+  channel.send("custom:event", { value: 1 });
+  status = JSON.parse(invokeMiddleware(middleware, {}).response.body);
+  assert.equal(status.revision, 4);
+  assert.deepEqual(sent.at(-1), ["custom:event", { value: 1 }]);
+
+  const hostilePayload = {};
+  Object.defineProperty(hostilePayload, "type", {
+    get() {
+      throw new Error("telemetry failure");
+    },
+  });
+  channel.send(hostilePayload);
+  assert.equal(sent.length, 7);
+  assert.equal(sent[0][0].type, "error");
 
   for (const address of ["127.0.0.1", "::1", "::ffff:127.0.0.1"]) {
     const result = invokeMiddleware(middleware, {
