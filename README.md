@@ -5,7 +5,7 @@ Vite integration for Wzhooh live previews in a sandboxed iframe.
 ## Install
 
 ```bash
-npm install -D @wzhooh/vite-plugin@0.0.3
+npm install -D @wzhooh/vite-plugin
 ```
 
 ## Configure
