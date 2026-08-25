@@ -1,0 +1,40 @@
+{
+  "name": "@wzhooh/vite-plugin",
+  "version": "0.0.1",
+  "description": "Vite plugin for Wzhooh applications running in sandboxed iframes",
+  "type": "module",
+  "keywords": [
+    "vite",
+    "vite-plugin",
+    "hmr",
+    "live-preview",
+    "wzhooh"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/MIZUDINOV/wzhooh-back.git",
+    "directory": "infra/e2b-template/host/vite-plugin"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "exports": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "pnpm run build && node --test test/*.test.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "vite": "^8.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "typescript": "6.0.3",
+    "vite": "8.2.2"
+  }
+}
