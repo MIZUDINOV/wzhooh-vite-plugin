@@ -1,23 +1,6 @@
-export type PreviewEventType =
-  | "bridge.ready"
-  | "hmr.connected"
-  | "hmr.disconnected"
-  | "hmr.updating"
-  | "hmr.ready"
-  | "hmr.error"
-  | "runtime.error"
-  | "navigation.changed";
+import type { ViteHotContext } from "vite/types/hot.d.ts";
 
-export interface WzhoohPreviewEventV1 {
-  source: "wzhooh-preview";
-  protocol: 1;
-  sequence: number;
-  timestamp: number;
-  type: PreviewEventType;
-  data: Record<string, unknown>;
-}
-
-export interface PreviewErrorV1 extends Record<string, unknown> {
+export interface PreviewErrorV1 {
   kind: string;
   message: string;
   stack?: string;
@@ -26,6 +9,60 @@ export interface PreviewErrorV1 extends Record<string, unknown> {
   line?: number;
   column?: number;
   plugin?: string;
+}
+
+export interface PreviewEventDataMap {
+  "bridge.ready": { url: string };
+  "hmr.connected": Record<string, never>;
+  "hmr.disconnected": Record<string, never>;
+  "hmr.updating": Record<string, never>;
+  "hmr.ready": Record<string, never>;
+  "hmr.error": PreviewErrorV1;
+  "runtime.error": PreviewErrorV1;
+  "navigation.changed": { url: string };
+}
+
+export type PreviewEventType = keyof PreviewEventDataMap;
+
+type PreviewEventFor<Type extends PreviewEventType> = {
+  source: "wzhooh-preview";
+  protocol: 1;
+  sequence: number;
+  timestamp: number;
+  type: Type;
+  data: PreviewEventDataMap[Type];
+};
+
+export type WzhoohPreviewEventV1 = {
+  [Type in PreviewEventType]: PreviewEventFor<Type>;
+}[PreviewEventType];
+
+export type BuildStatusState =
+  | "starting"
+  | "updating"
+  | "ready"
+  | "error"
+  | "disconnected";
+
+type BuildStatusSignalBase = {
+  protocol: 1;
+  session_id: string;
+  sequence: number;
+};
+
+export type BuildStatusSignalV1 =
+  | (BuildStatusSignalBase & {
+      state: Exclude<BuildStatusState, "error">;
+    })
+  | (BuildStatusSignalBase & {
+      state: "error";
+      error: PreviewErrorV1;
+    });
+
+declare module "vite/types/customEvent.d.ts" {
+  interface CustomEventMap {
+    "wzhooh:build-status": BuildStatusSignalV1;
+  }
 }
 
 export interface ClientRuntimeOptions {
@@ -49,11 +86,11 @@ export function sanitizePreviewError(
     if (typeof candidate !== "string" || candidate.length === 0)
       return undefined;
     const withoutOrigins = candidate.replace(/https?:\/\/[^/\s]+/g, "");
-    const withoutAbsolutePaths = withoutOrigins
+    return withoutOrigins
       .replace(/file:\/\/\/(?:workspace|opt\/wzhooh)\/?/gi, "")
       .replace(/(?:[A-Za-z]:\\|\/)(?:[^\s:()]+[\\/])+/g, "")
-      .replace(/\\/g, "/");
-    return withoutAbsolutePaths.slice(0, limit);
+      .replace(/\\/g, "/")
+      .slice(0, limit);
   };
   const input = value && typeof value === "object" ? (value as ErrorLike) : {};
   const location =
@@ -66,34 +103,27 @@ export function sanitizePreviewError(
     candidate >= 0
       ? Math.trunc(candidate)
       : undefined;
-  const message =
-    limitedString(
-      input.message ?? (typeof value === "string" ? value : undefined),
-      4_000,
-    ) ?? "Unknown preview error";
-  const result: PreviewErrorV1 = {
-    kind: limitedString(input.kind, 64) ?? fallbackKind,
-    message,
-  };
-  const optionalStrings = {
-    stack: limitedString(input.stack, 16_000),
-    frame: limitedString(input.frame, 16_000),
-    file: limitedString(input.file ?? input.id, 1_000),
-    plugin: limitedString(input.plugin, 256),
-  };
-  for (const [key, optional] of Object.entries(optionalStrings)) {
-    if (optional) (result as Record<string, unknown>)[key] = optional;
-  }
+  const stack = limitedString(input.stack, 16_000);
+  const frame = limitedString(input.frame, 16_000);
+  const file = limitedString(input.file ?? input.id, 1_000);
+  const plugin = limitedString(input.plugin, 256);
   const line = number(input.line ?? location?.line);
   const column = number(input.column ?? input.col ?? location?.column);
-  if (line !== undefined) result.line = line;
-  if (column !== undefined) result.column = column;
-  return result;
-}
 
-interface HotClient {
-  on(event: string, handler: (payload?: unknown) => void): void;
-  send(event: string, payload: unknown): void;
+  return {
+    kind: limitedString(input.kind, 64) ?? fallbackKind,
+    message:
+      limitedString(
+        input.message ?? (typeof value === "string" ? value : undefined),
+        4_000,
+      ) ?? "Unknown preview error",
+    ...(stack ? { stack } : {}),
+    ...(frame ? { frame } : {}),
+    ...(file ? { file } : {}),
+    ...(plugin ? { plugin } : {}),
+    ...(line !== undefined ? { line } : {}),
+    ...(column !== undefined ? { column } : {}),
+  };
 }
 
 interface PreviewRuntimeWindow extends Window {
@@ -104,57 +134,87 @@ export function installPreviewClient(
   options: ClientRuntimeOptions,
   sanitize: typeof sanitizePreviewError,
   root: PreviewRuntimeWindow = globalThis as unknown as PreviewRuntimeWindow,
-  hot: HotClient | undefined = (import.meta as ImportMeta & { hot?: HotClient })
-    .hot,
+  hot: ViteHotContext | undefined = (
+    import.meta as ImportMeta & { hot?: ViteHotContext }
+  ).hot,
 ): void {
   if (root.__wzhoohPreviewClientV1) return;
   root.__wzhoohPreviewClientV1 = true;
 
   let sequence = 0;
+  let statusSequence = 0;
   let channelID = "";
   let parentOrigin = "";
   let updating = false;
+  let compileErrorActive = false;
   let updateTimer: number | undefined;
   let runtimeBuffer: PreviewErrorV1[] = [];
+  let lastNavigationEvent:
+    | PreviewEventFor<"navigation.changed">
+    | undefined;
+  const sessionID =
+    root.crypto?.randomUUID?.() ??
+    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
-  const emit = (
-    type: PreviewEventType,
-    data: Record<string, unknown> = {},
-    dispatchInsideSite = true,
+  const postToParent = <Type extends PreviewEventType>(
+    detail: PreviewEventFor<Type>,
   ): void => {
-    const detail: WzhoohPreviewEventV1 = {
+    if (!channelID || root.parent === root) return;
+    root.parent.postMessage(
+      { ...detail, channel_id: channelID },
+      parentOrigin,
+    );
+  };
+
+  const emit = <Type extends PreviewEventType>(
+    type: Type,
+    data: PreviewEventDataMap[Type],
+  ): PreviewEventFor<Type> => {
+    const detail = {
       source: "wzhooh-preview",
       protocol: 1,
       sequence: ++sequence,
       timestamp: Date.now(),
       type,
       data,
-    };
-    if (dispatchInsideSite)
-      root.dispatchEvent(new CustomEvent("wzhooh:preview-event", { detail }));
-    if (channelID && root.parent !== root) {
-      root.parent.postMessage(
-        { ...detail, channel_id: channelID },
-        parentOrigin,
-      );
-    }
+    } as PreviewEventFor<Type>;
+    root.dispatchEvent(new CustomEvent("wzhooh:preview-event", { detail }));
+    postToParent(detail);
+    return detail;
   };
 
-  const sendBuildStatus = (state: string, error?: PreviewErrorV1): void => {
-    if (options.buildStatus) hot?.send("wzhooh:build-status", { state, error });
+  const sendBuildStatus = (
+    ...signal:
+      | [state: Exclude<BuildStatusState, "error">]
+      | [state: "error", error: PreviewErrorV1]
+  ): void => {
+    if (!options.buildStatus || !hot) return;
+    const base: Omit<BuildStatusSignalV1, "state" | "error"> = {
+      protocol: 1 as const,
+      session_id: sessionID,
+      sequence: ++statusSequence,
+    };
+    hot.send(
+      "wzhooh:build-status",
+      signal[0] === "error"
+        ? { ...base, state: signal[0], error: signal[1] }
+        : { ...base, state: signal[0] },
+    );
   };
 
   const clearUpdate = (): void => {
     updating = false;
+    compileErrorActive = false;
     runtimeBuffer = [];
-    if (updateTimer) root.clearTimeout(updateTimer);
+    if (updateTimer !== undefined) root.clearTimeout(updateTimer);
     updateTimer = undefined;
   };
 
   const failUpdate = (error: PreviewErrorV1): void => {
-    if (updateTimer) root.clearTimeout(updateTimer);
+    if (updateTimer !== undefined) root.clearTimeout(updateTimer);
     updateTimer = undefined;
     updating = false;
+    compileErrorActive = true;
     if (options.errorNotifier) {
       emit("hmr.error", error);
       for (const buffered of runtimeBuffer) emit("runtime.error", buffered);
@@ -166,9 +226,9 @@ export function installPreviewClient(
   const beginUpdate = (): void => {
     updating = true;
     runtimeBuffer = [];
-    if (options.hmrNotifier) emit("hmr.updating");
+    if (options.hmrNotifier) emit("hmr.updating", {});
     sendBuildStatus("updating");
-    if (updateTimer) root.clearTimeout(updateTimer);
+    if (updateTimer !== undefined) root.clearTimeout(updateTimer);
     updateTimer = root.setTimeout(
       () =>
         failUpdate(
@@ -179,7 +239,6 @@ export function installPreviewClient(
   };
 
   const runtimeError = (value: unknown, kind: string): void => {
-    if (!options.errorNotifier) return;
     const input =
       value && typeof value === "object" ? (value as ErrorLike) : undefined;
     const error = sanitize(
@@ -211,8 +270,7 @@ export function installPreviewClient(
     channelID = data.channel_id;
     parentOrigin = event.origin;
     emit("bridge.ready", { url: root.location.href });
-    if (options.navigationNotifier)
-      emit("navigation.changed", { url: root.location.href }, false);
+    if (lastNavigationEvent) postToParent(lastNavigationEvent);
   });
 
   emit("bridge.ready", { url: root.location.href });
@@ -223,7 +281,7 @@ export function installPreviewClient(
       const url = root.location.href;
       if (url === lastURL) return;
       lastURL = url;
-      emit("navigation.changed", { url });
+      lastNavigationEvent = emit("navigation.changed", { url });
     };
     const pushState = root.history.pushState.bind(root.history);
     root.history.pushState = (data, unused, url) => {
@@ -260,29 +318,31 @@ export function installPreviewClient(
 
   if (!hot) return;
   hot.on("vite:ws:connect", () => {
-    if (options.hmrNotifier) emit("hmr.connected");
-    sendBuildStatus("ready");
+    if (options.hmrNotifier) emit("hmr.connected", {});
+    sendBuildStatus("starting");
   });
   hot.on("vite:ws:disconnect", () => {
-    if (options.hmrNotifier) emit("hmr.disconnected");
+    if (options.hmrNotifier) emit("hmr.disconnected", {});
     sendBuildStatus("disconnected");
   });
   hot.on("vite:beforeUpdate", beginUpdate);
   hot.on("vite:beforeFullReload", beginUpdate);
   hot.on("vite:afterUpdate", () => {
     clearUpdate();
-    if (options.hmrNotifier) emit("hmr.ready");
+    if (options.hmrNotifier) emit("hmr.ready", {});
     sendBuildStatus("ready");
   });
-  hot.on("vite:error", (payload: unknown) => {
-    const error = sanitize(
-      payload && typeof payload === "object" && "err" in payload
-        ? (payload as { err: unknown }).err
-        : payload,
-      "compile",
-    );
+  hot.on("vite:error", (payload) => {
+    const error = sanitize(payload.err, "compile");
     failUpdate({ ...error, kind: "compile" });
   });
 
-  sendBuildStatus("ready");
+  const initialReady = (): void => {
+    root.setTimeout(() => {
+      if (!compileErrorActive && !updating) sendBuildStatus("ready");
+    }, 0);
+  };
+  if (root.document?.readyState === "complete") initialReady();
+  else root.addEventListener("load", initialReady, { once: true });
+  sendBuildStatus("starting");
 }

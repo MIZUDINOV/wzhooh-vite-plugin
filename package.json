@@ -1,8 +1,9 @@
 {
   "name": "@wzhooh/vite-plugin",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Vite plugin for Wzhooh applications running in sandboxed iframes",
   "type": "module",
+  "license": "MIT",
   "keywords": [
     "vite",
     "vite-plugin",
@@ -10,11 +11,6 @@
     "live-preview",
     "wzhooh"
   ],
-  "repository": {
-    "type": "git",
-    "url": "git+ssh://git@github.com/MIZUDINOV/wzhooh-back.git",
-    "directory": "infra/e2b-template/host/vite-plugin"
-  },
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
@@ -26,15 +22,22 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "pnpm run build && node --test test/*.test.mjs",
-    "prepublishOnly": "npm run build"
+    "test": "npm run build && npm run test:types && vitest run",
+    "test:coverage": "npm run build && npm run test:types && vitest run --coverage",
+    "test:types": "tsc -p test/tsconfig.json",
+    "prepublishOnly": "npm run test:coverage"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
   },
   "peerDependencies": {
     "vite": "^8.2.2"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "4.1.11",
     "@types/node": "26.2.0",
     "typescript": "6.0.3",
-    "vite": "8.2.2"
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
   }
 }
