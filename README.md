@@ -1,13 +1,16 @@
+# @wzhooh/vite-plugin
+
+Vite integration for Wzhooh live previews in a sandboxed iframe.
+
 ## Install
 
 ```bash
-pnpm add -D @wzhooh/vite-plugin
-# or: npm install -D @wzhooh/vite-plugin
+npm add -D @wzhooh/vite-plugin@0.0.3
 ```
 
-Vite is a peer dependency and must be installed by the application.
-
 ## Configure
+
+Add the plugin to the Vite config used by the Wzhooh preview:
 
 ```ts
 import { defineConfig } from "vite";
@@ -26,15 +29,11 @@ export default defineConfig({
 });
 ```
 
-All options default to `false`. The plugin is for Vite development preview; it
-does not inject a bridge into production builds.
+The plugin reports HMR updates, navigation and runtime errors to the parent
+preview. `buildStatus` lets the backend read the latest build state.
 
-## Verify
+## Test
 
 ```bash
 npm test
-npm run test:coverage
 ```
-
-Unit and integration tests run on Vitest. The coverage command requires 100%
-per file for statements, branches, functions, and lines.
