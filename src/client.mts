@@ -125,6 +125,13 @@ export function installPreviewClient(
     if (!channelID || root.parent === root) return;
     root.parent.postMessage({ ...detail, channel_id: channelID }, parentOrigin);
   };
+  const replayToParent = <Type extends PreviewEventType>(
+    detail: PreviewEventFor<Type>,
+  ): PreviewEventFor<Type> => {
+    const replay = { ...detail, sequence: ++sequence, timestamp: Date.now() };
+    postToParent(replay);
+    return replay;
+  };
 
   const emit = <Type extends PreviewEventType>(
     type: Type,
@@ -194,8 +201,17 @@ export function installPreviewClient(
 
   root.addEventListener("message", (event: MessageEvent) => {
     const data = event.data as Record<string, unknown> | null;
+    let origin: URL;
+    try {
+      origin = new URL(event.origin);
+    } catch {
+      return;
+    }
     if (
       event.source !== root.parent ||
+      (origin.protocol !== "http:" && origin.protocol !== "https:") ||
+      origin.origin !== event.origin ||
+      (parentOrigin !== "" && event.origin !== parentOrigin) ||
       !data ||
       data.source !== "wzhooh-editor" ||
       data.protocol !== 1 ||
@@ -207,7 +223,8 @@ export function installPreviewClient(
     channelID = data.channel_id;
     parentOrigin = event.origin;
     emit("bridge.ready", { url: root.location.href });
-    if (lastNavigationEvent) postToParent(lastNavigationEvent);
+    if (lastNavigationEvent)
+      lastNavigationEvent = replayToParent(lastNavigationEvent);
   });
 
   emit("bridge.ready", { url: root.location.href });

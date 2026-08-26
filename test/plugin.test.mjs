@@ -128,6 +128,15 @@ test("Vite config is deterministic and preserves explicitly disabled HMR", async
     },
   });
 
+  const previousPreview = process.env.WZHOOH_PREVIEW;
+  process.env.WZHOOH_PREVIEW = "1";
+  try {
+    assert.deepEqual(defaults.config({}), { server: { allowedHosts: true } });
+  } finally {
+    if (previousPreview === undefined) delete process.env.WZHOOH_PREVIEW;
+    else process.env.WZHOOH_PREVIEW = previousPreview;
+  }
+
   const resolvedDisabledHMR = await resolveConfig(
     {
       configFile: false,
@@ -362,9 +371,14 @@ test("navigation is deduplicated and bridge rejects invalid handshakes", () => {
     { data: { ...validBridgeInit(), channel_id: 123 } },
     { data: { ...validBridgeInit(), channel_id: "short" } },
     { data: validBridgeInit(), source: {} },
+    { data: validBridgeInit(), origin: "null" },
+    { data: validBridgeInit(), origin: "https://app.wzhooh.test/path" },
   ];
   for (const item of invalidMessages) {
-    dispatchMessage(root, item.data, { source: item.source ?? root.parent });
+    dispatchMessage(root, item.data, {
+      source: item.source ?? root.parent,
+      origin: item.origin ?? "https://app.wzhooh.test",
+    });
   }
   assert.equal(root.parentMessages.length, 0);
 
@@ -403,9 +417,15 @@ test("navigation is deduplicated and bridge rejects invalid handshakes", () => {
   dispatchMessage(root, validBridgeInit(secondChannelID), {
     origin: "https://new.wzhooh.test",
   });
+  assert.equal(root.parentMessages.at(-1).message.channel_id, channelID);
+  dispatchMessage(root, validBridgeInit(secondChannelID));
   root.history.pushState({}, "", "/three");
-  assert.equal(root.parentMessages.at(-1).origin, "https://new.wzhooh.test");
+  assert.equal(root.parentMessages.at(-1).origin, "https://app.wzhooh.test");
   assert.equal(root.parentMessages.at(-1).message.channel_id, secondChannelID);
+  assert.deepEqual(
+    root.parentMessages.map((item) => item.message.sequence),
+    root.parentMessages.map((_, index) => index + 3),
+  );
 });
 
 test("client stays inert when features or HMR are disabled", async () => {

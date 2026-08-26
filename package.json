@@ -1,6 +1,6 @@
 {
   "name": "@wzhooh/vite-plugin",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Vite plugin for Wzhooh applications running in sandboxed iframes",
   "type": "module",
   "license": "MIT",

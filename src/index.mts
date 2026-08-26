@@ -118,6 +118,7 @@ export default function wzhooh(options: WzhoohVitePluginOptions = {}): Plugin {
     enforce: "post",
     config(config: UserConfig) {
       const server: NonNullable<UserConfig["server"]> = {
+        ...(process.env.WZHOOH_PREVIEW === "1" ? { allowedHosts: true } : {}),
         ...(runtimeOptions.errorNotifier && config.server?.hmr !== false
           ? { hmr: { overlay: false } }
           : {}),
